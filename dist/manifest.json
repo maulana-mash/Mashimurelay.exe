@@ -1,0 +1,29 @@
+{
+  "name": "Mashimurelay — Electromechanical Relay Simulator",
+  "short_name": "Mashimurelay",
+  "description": "Industrial Electromechanical Relay Circuit & Motor Control Simulator",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#121216",
+  "theme_color": "#1a1a24",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "assets/icons/icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "assets/icons/icon432.png",
+      "sizes": "432x432",
+      "type": "image/png"
+    },
+    {
+      "src": "assets/icons/icon_1024.png",
+      "sizes": "1024x1024",
+      "type": "image/png"
+    }
+  ]
+}

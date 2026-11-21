@@ -43,6 +43,10 @@ pub struct ClassroomServerInfo {
     pub save_dir: String,
     #[serde(default)]
     pub exam_mode: bool,
+    #[serde(default)]
+    pub has_jobsheet: bool,
+    #[serde(default)]
+    pub jobsheet_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -61,6 +65,8 @@ pub struct AppClassroomState {
     pub save_dir: Arc<Mutex<String>>,
     pub active_port: Arc<Mutex<u16>>,
     pub exam_mode: Arc<AtomicBool>,
+    pub jobsheet_bytes: Arc<Mutex<Option<Vec<u8>>>>,
+    pub jobsheet_filename: Arc<Mutex<Option<String>>>,
 }
 
 fn get_local_ip() -> String {
@@ -114,6 +120,8 @@ fn handle_http_client(
     submissions_ref: Arc<Mutex<Vec<SubmissionRecord>>>,
     save_dir_ref: Arc<Mutex<String>>,
     exam_mode_ref: Arc<AtomicBool>,
+    jobsheet_bytes_ref: Arc<Mutex<Option<Vec<u8>>>>,
+    jobsheet_filename_ref: Arc<Mutex<Option<String>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0u8; 8192];
     let bytes_read = stream.read(&mut buffer)?;
@@ -134,7 +142,7 @@ fn handle_http_client(
     let is_exam = exam_mode_ref.load(Ordering::SeqCst);
 
     if method == "OPTIONS" {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n";
+        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name\r\nConnection: close\r\n\r\n";
         stream.write_all(resp.as_bytes())?;
         return Ok(());
     }
@@ -142,9 +150,15 @@ fn handle_http_client(
     if method == "GET" && (path == "/task.smrl" || path == "/") {
         let content = task_json_ref.lock().unwrap().clone();
         let content_bytes = content.as_bytes();
+        let js_name_opt = jobsheet_filename_ref.lock().unwrap().clone();
+        let has_js = jobsheet_bytes_ref.lock().unwrap().is_some();
+        let js_header_val = if has_js { "true" } else { "false" };
+        let js_name_val = js_name_opt.unwrap_or_default();
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode\r\nX-Exam-Mode: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name\r\nX-Exam-Mode: {}\r\nX-Has-Jobsheet: {}\r\nX-Jobsheet-Name: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             is_exam,
+            js_header_val,
+            js_name_val,
             content_bytes.len(),
             content
         );
@@ -153,18 +167,54 @@ fn handle_http_client(
     }
 
     if method == "GET" && path == "/info" {
+        let js_name_opt = jobsheet_filename_ref.lock().unwrap().clone();
+        let has_js = jobsheet_bytes_ref.lock().unwrap().is_some();
+        let js_name_val = js_name_opt.unwrap_or_default();
         let resp_json = format!(
-            "{{\"status\":\"ok\",\"exam_mode\":{}}}",
-            is_exam
+            "{{\"status\":\"ok\",\"exam_mode\":{},\"has_jobsheet\":{},\"jobsheet_name\":\"{}\"}}",
+            is_exam,
+            has_js,
+            js_name_val.replace('"', "\\\"")
         );
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode\r\nX-Exam-Mode: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name\r\nX-Exam-Mode: {}\r\nX-Has-Jobsheet: {}\r\nX-Jobsheet-Name: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             is_exam,
+            if has_js { "true" } else { "false" },
+            js_name_val,
             resp_json.len(),
             resp_json
         );
         stream.write_all(resp.as_bytes())?;
         return Ok(());
+    }
+
+    if method == "GET" && (path == "/jobsheet.pdf" || path == "/jobsheet") {
+        let js_bytes_opt = jobsheet_bytes_ref.lock().unwrap().clone();
+        let js_name_opt = jobsheet_filename_ref.lock().unwrap().clone();
+        match js_bytes_opt {
+            Some(bytes) => {
+                let filename = js_name_opt.unwrap_or_else(|| "jobsheet.pdf".to_string());
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nContent-Disposition: inline; filename=\"{}\"\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name\r\nX-Has-Jobsheet: true\r\nX-Jobsheet-Name: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                    bytes.len(),
+                    filename,
+                    filename
+                );
+                stream.write_all(header.as_bytes())?;
+                stream.write_all(&bytes)?;
+                return Ok(());
+            }
+            None => {
+                let resp_body = b"{\"error\":\"Jobsheet tidak tersedia\"}";
+                let resp = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet\r\nX-Has-Jobsheet: false\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    resp_body.len()
+                );
+                stream.write_all(resp.as_bytes())?;
+                stream.write_all(resp_body)?;
+                return Ok(());
+            }
+        }
     }
 
     if method == "POST" && path == "/submit" {
@@ -305,11 +355,45 @@ fn handle_http_client(
 fn start_classroom_server(
     task_name: String,
     circuit_content: String,
+    jobsheet_base64: Option<String>,
+    jobsheet_filename: Option<String>,
     state: tauri::State<AppClassroomState>,
 ) -> Result<ClassroomServerInfo, String> {
+    let mut js_bytes: Option<Vec<u8>> = None;
+    let mut js_name: Option<String> = None;
+
+    if let Some(ref b64) = jobsheet_base64 {
+        if !b64.trim().is_empty() {
+            let pure_b64 = match b64.find(',') {
+                Some(idx) if b64[..idx].contains("base64") => &b64[idx + 1..],
+                _ => b64.trim(),
+            };
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(pure_b64) {
+                if !decoded.is_empty() && decoded.len() <= 25 * 1024 * 1024 {
+                    let raw_name = jobsheet_filename.as_deref().unwrap_or("jobsheet.pdf");
+                    let clean_name = raw_name.rsplit(|c| c == '/' || c == '\\').next().unwrap_or("jobsheet.pdf");
+                    let safe_name = if clean_name.to_ascii_lowercase().ends_with(".pdf") {
+                        clean_name.to_string()
+                    } else {
+                        format!("{}.pdf", clean_name)
+                    };
+                    js_bytes = Some(decoded);
+                    js_name = Some(safe_name);
+                }
+            }
+        }
+    }
+
+    let has_js = js_bytes.is_some();
+    *state.jobsheet_bytes.lock().unwrap() = js_bytes;
+    *state.jobsheet_filename.lock().unwrap() = js_name.clone();
+
     if state.running.load(Ordering::SeqCst) {
         *state.task_json.lock().unwrap() = circuit_content.clone();
-        if let Some(info) = state.server_info.lock().unwrap().clone() {
+        if let Some(mut info) = state.server_info.lock().unwrap().clone() {
+            info.has_jobsheet = has_js;
+            info.jobsheet_name = js_name;
+            *state.server_info.lock().unwrap() = Some(info.clone());
             return Ok(info);
         }
     }
@@ -345,6 +429,8 @@ fn start_classroom_server(
         task_name: task_name.clone(),
         save_dir: dir_str.clone(),
         exam_mode: is_exam,
+        has_jobsheet: has_js,
+        jobsheet_name: js_name,
     };
 
     *state.task_json.lock().unwrap() = circuit_content;
@@ -359,6 +445,8 @@ fn start_classroom_server(
     let submissions_ref = state.submissions.clone();
     let save_dir_ref = state.save_dir.clone();
     let exam_mode_ref = state.exam_mode.clone();
+    let jobsheet_bytes_ref = state.jobsheet_bytes.clone();
+    let jobsheet_filename_ref = state.jobsheet_filename.clone();
 
     thread::spawn(move || {
         let _ = listener.set_nonblocking(false);
@@ -371,9 +459,11 @@ fn start_classroom_server(
                 let subs = submissions_ref.clone();
                 let s_dir = save_dir_ref.clone();
                 let e_mode = exam_mode_ref.clone();
+                let js_b = jobsheet_bytes_ref.clone();
+                let js_f = jobsheet_filename_ref.clone();
 
                 thread::spawn(move || {
-                    let _ = handle_http_client(&mut stream, t_json, subs, s_dir, e_mode);
+                    let _ = handle_http_client(&mut stream, t_json, subs, s_dir, e_mode, js_b, js_f);
                 });
             }
         }
@@ -390,6 +480,8 @@ fn stop_classroom_server(state: tauri::State<AppClassroomState>) -> Result<(), S
         let _ = TcpStream::connect(("127.0.0.1", port));
         *state.server_info.lock().unwrap() = None;
     }
+    *state.jobsheet_bytes.lock().unwrap() = None;
+    *state.jobsheet_filename.lock().unwrap() = None;
     state.submissions.lock().unwrap().clear();
     Ok(())
 }
@@ -572,6 +664,8 @@ pub fn run() {
         save_dir: Arc::new(Mutex::new(String::new())),
         active_port: Arc::new(Mutex::new(8765)),
         exam_mode: Arc::new(AtomicBool::new(false)),
+        jobsheet_bytes: Arc::new(Mutex::new(None)),
+        jobsheet_filename: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()

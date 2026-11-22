@@ -177,5 +177,7 @@ Biner keluaran akan berada pada lokasi berikut:
 
 ## Lisensi & Hak Cipta
 
-Hak Cipta © 2026 **Mashimurelay Engineering Project** (Maulana Mash). Seluruh hak cipta dilindungi undang-undang.  
+Hak Cipta © 2026 **Mashimurelay Engineering Project (Mash Maulana)**. Seluruh hak cipta dilindungi undang-undang.  
 Dirancang dan direkayasa untuk pendidikan vokasi ketenagalistrikan, laboratorium teknik elektro, serta pelatihan otomasi industri.
+
+> **Keterangan Standar & Orisinalitas Aset:** Seluruh 117 simbol skematik kelistrikan mengacu pada standar internasional publik **IEC 60617 / DIN EN 60617** dan digenerasi mandiri sebagai vektor SVG *clean-room*. Mesin simulasi kelistrikan, deteksi gangguan per-jalur, *Teacher Lab Mode*, dan paket desktop Rust Tauri v2 merupakan implementasi rekayasa orisinal Mashimurelay.

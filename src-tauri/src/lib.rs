@@ -57,6 +57,13 @@ pub struct ClassroomStatusResponse {
     pub exam_mode: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FirewallStatusResponse {
+    pub status: String, // "allowed" | "blocked" | "partial" | "unconfigured" | "unknown"
+    pub exe_path: String,
+    pub detail: String,
+}
+
 pub struct AppClassroomState {
     pub running: Arc<AtomicBool>,
     pub server_info: Arc<Mutex<Option<ClassroomServerInfo>>>,
@@ -654,6 +661,167 @@ fn force_close_app(window: tauri::Window) {
     let _ = window.destroy();
 }
 
+fn current_exe_clean_path() -> String {
+    let raw = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn check_firewall_status_sync() -> FirewallStatusResponse {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let exe_path = current_exe_clean_path();
+    if exe_path.is_empty() {
+        return FirewallStatusResponse {
+            status: "unknown".to_string(),
+            exe_path,
+            detail: "Lokasi berkas aplikasi tidak terdeteksi.".to_string(),
+        };
+    }
+
+    let ps_script = concat!(
+        "$p = $env:MASHIMU_EXE_PATH.ToLowerInvariant(); ",
+        "$hasBlock = $false; $hasPriv = $false; $hasPub = $false; ",
+        "try { ",
+        "  Get-NetFirewallApplicationFilter -ErrorAction Stop | Where-Object { $_.Program -and $_.Program.ToLowerInvariant() -eq $p } | ForEach-Object { ",
+        "    $r = $_ | Get-NetFirewallRule -ErrorAction SilentlyContinue; ",
+        "    if ($r -and $r.Enabled -eq 'True' -and $r.Direction -eq 'Inbound') { ",
+        "      $prof = $r.Profile.ToString(); ",
+        "      if ($r.Action -eq 'Block') { $hasBlock = $true } ",
+        "      elseif ($r.Action -eq 'Allow') { ",
+        "        if ($prof -match 'Any' -or $prof -match 'Private') { $hasPriv = $true } ",
+        "        if ($prof -match 'Any' -or $prof -match 'Public') { $hasPub = $true } ",
+        "      } ",
+        "    } ",
+        "  }; ",
+        "  if ($hasBlock) { Write-Output 'BLOCKED' } ",
+        "  elseif ($hasPriv -and $hasPub) { Write-Output 'ALLOWED' } ",
+        "  elseif ($hasPriv -or $hasPub) { Write-Output 'PARTIAL' } ",
+        "  else { Write-Output 'UNCONFIGURED' } ",
+        "} catch { Write-Output 'UNKNOWN' }"
+    );
+
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script])
+        .env("MASHIMU_EXE_PATH", &exe_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let code = match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_ascii_uppercase(),
+        Err(_) => "UNKNOWN".to_string(),
+    };
+
+    match code.as_str() {
+        "BLOCKED" => FirewallStatusResponse {
+            status: "blocked".to_string(),
+            exe_path,
+            detail: "Akses Hotspot terblokir Windows Firewall (kemungkinan sebelumnya menekan Batal). HP siswa tidak dapat terhubung sebelum izin dibuka.".to_string(),
+        },
+        "ALLOWED" => FirewallStatusResponse {
+            status: "allowed".to_string(),
+            exe_path,
+            detail: "Whitelist Windows Firewall aktif (Private & Public). HP siswa siap terhubung.".to_string(),
+        },
+        "PARTIAL" => FirewallStatusResponse {
+            status: "partial".to_string(),
+            exe_path,
+            detail: "Izin Firewall baru aktif di sebagian profil jaringan. Pasang whitelist penuh (Private & Public) agar koneksi Hotspot selalu lancar.".to_string(),
+        },
+        "UNCONFIGURED" => FirewallStatusResponse {
+            status: "unconfigured".to_string(),
+            exe_path,
+            detail: "Whitelist Windows Firewall belum terpasang untuk berkas ini (versi Portable). Klik tombol di samping agar koneksi siswa bebas hambatan.".to_string(),
+        },
+        _ => FirewallStatusResponse {
+            status: "unknown".to_string(),
+            exe_path,
+            detail: "Tidak dapat membaca status Windows Firewall secara otomatis.".to_string(),
+        },
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn check_firewall_status_sync() -> FirewallStatusResponse {
+    FirewallStatusResponse {
+        status: "allowed".to_string(),
+        exe_path: current_exe_clean_path(),
+        detail: "Firewall Windows tidak berlaku pada sistem ini.".to_string(),
+    }
+}
+
+#[tauri::command]
+async fn check_classroom_firewall_status() -> Result<FirewallStatusResponse, String> {
+    tauri::async_runtime::spawn_blocking(check_firewall_status_sync)
+        .await
+        .map_err(|e| format!("Gagal memeriksa firewall: {}", e))
+}
+
+#[cfg(target_os = "windows")]
+fn allow_classroom_firewall_sync() -> Result<FirewallStatusResponse, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let exe_path = current_exe_clean_path();
+    if exe_path.is_empty() {
+        return Err("Lokasi aplikasi Mashimurelay tidak ditemukan.".to_string());
+    }
+
+    let escaped_exe = exe_path.replace('\'', "''");
+    let script_body = format!(
+        "$target = '{exe}'.ToLowerInvariant()\r\n\
+         Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object {{ $_.Program -and $_.Program.ToLowerInvariant() -eq $target }} | ForEach-Object {{\r\n\
+           $r = $_ | Get-NetFirewallRule -ErrorAction SilentlyContinue\r\n\
+           if ($r -and $r.Direction -eq 'Inbound' -and ($r.Action -eq 'Block' -or $r.DisplayName -eq 'Mashimurelay Hotspot Kelas')) {{\r\n\
+             Remove-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue\r\n\
+           }}\r\n\
+         }}\r\n\
+         New-NetFirewallRule -DisplayName 'Mashimurelay Hotspot Kelas' -Direction Inbound -Action Allow -Program '{exe}' -Protocol TCP -LocalPort 8765-8785 -Profile Private,Public -Enabled True -Description 'Mengizinkan koneksi offline LAN Hotspot Kelas Mashimurelay (port 8765-8785)' -ErrorAction Stop | Out-Null\r\n",
+        exe = escaped_exe
+    );
+
+    let temp_script = std::env::temp_dir().join(format!("mashimurelay_fw_{}.ps1", std::process::id()));
+    fs::write(&temp_script, script_body)
+        .map_err(|e| format!("Gagal menyiapkan skrip firewall: {}", e))?;
+
+    let escaped_script = temp_script.to_string_lossy().replace('\'', "''");
+    let elevate_cmd = format!(
+        "try {{ $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','{script}') -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode }} catch {{ exit 1223 }}",
+        script = escaped_script
+    );
+
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &elevate_cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+
+    let _ = fs::remove_file(&temp_script);
+
+    match status {
+        Ok(s) if s.code() == Some(1223) => {
+            Err("Konfirmasi izin Administrator (UAC) dibatalkan oleh pengguna.".to_string())
+        }
+        Ok(s) if s.success() => Ok(check_firewall_status_sync()),
+        Ok(s) => Err(format!("Konfigurasi Windows Firewall gagal (kode {:?}).", s.code())),
+        Err(e) => Err(format!("Gagal menjalankan konfigurasi Firewall: {}", e)),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn allow_classroom_firewall_sync() -> Result<FirewallStatusResponse, String> {
+    Ok(check_firewall_status_sync())
+}
+
+#[tauri::command]
+async fn allow_classroom_firewall() -> Result<FirewallStatusResponse, String> {
+    tauri::async_runtime::spawn_blocking(allow_classroom_firewall_sync)
+        .await
+        .map_err(|e| format!("Gagal memproses firewall: {}", e))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let classroom_state = AppClassroomState {
@@ -693,6 +861,8 @@ pub fn run() {
             set_classroom_exam_mode,
             open_classroom_folder,
             select_classroom_folder,
+            check_classroom_firewall_status,
+            allow_classroom_firewall,
             force_close_app
         ])
         .run(tauri::generate_context!())

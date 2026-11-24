@@ -47,6 +47,10 @@ pub struct ClassroomServerInfo {
     pub has_jobsheet: bool,
     #[serde(default)]
     pub jobsheet_name: Option<String>,
+    #[serde(default)]
+    pub has_modules: bool,
+    #[serde(default)]
+    pub modules_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -74,6 +78,8 @@ pub struct AppClassroomState {
     pub exam_mode: Arc<AtomicBool>,
     pub jobsheet_bytes: Arc<Mutex<Option<Vec<u8>>>>,
     pub jobsheet_filename: Arc<Mutex<Option<String>>>,
+    pub modules_json: Arc<Mutex<Option<String>>>,
+    pub modules_count: Arc<Mutex<usize>>,
 }
 
 fn get_local_ip() -> String {
@@ -129,6 +135,8 @@ fn handle_http_client(
     exam_mode_ref: Arc<AtomicBool>,
     jobsheet_bytes_ref: Arc<Mutex<Option<Vec<u8>>>>,
     jobsheet_filename_ref: Arc<Mutex<Option<String>>>,
+    modules_json_ref: Arc<Mutex<Option<String>>>,
+    modules_count_ref: Arc<Mutex<usize>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0u8; 8192];
     let bytes_read = stream.read(&mut buffer)?;
@@ -149,7 +157,7 @@ fn handle_http_client(
     let is_exam = exam_mode_ref.load(Ordering::SeqCst);
 
     if method == "OPTIONS" {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name\r\nConnection: close\r\n\r\n";
+        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name, X-Has-Modules, X-Modules-Count\r\nConnection: close\r\n\r\n";
         stream.write_all(resp.as_bytes())?;
         return Ok(());
     }
@@ -161,11 +169,15 @@ fn handle_http_client(
         let has_js = jobsheet_bytes_ref.lock().unwrap().is_some();
         let js_header_val = if has_js { "true" } else { "false" };
         let js_name_val = js_name_opt.unwrap_or_default();
+        let mod_count = *modules_count_ref.lock().unwrap();
+        let has_mods_val = if mod_count > 0 { "true" } else { "false" };
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name\r\nX-Exam-Mode: {}\r\nX-Has-Jobsheet: {}\r\nX-Jobsheet-Name: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name, X-Has-Modules, X-Modules-Count\r\nX-Exam-Mode: {}\r\nX-Has-Jobsheet: {}\r\nX-Jobsheet-Name: {}\r\nX-Has-Modules: {}\r\nX-Modules-Count: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             is_exam,
             js_header_val,
             js_name_val,
+            has_mods_val,
+            mod_count,
             content_bytes.len(),
             content
         );
@@ -177,21 +189,43 @@ fn handle_http_client(
         let js_name_opt = jobsheet_filename_ref.lock().unwrap().clone();
         let has_js = jobsheet_bytes_ref.lock().unwrap().is_some();
         let js_name_val = js_name_opt.unwrap_or_default();
+        let mod_count = *modules_count_ref.lock().unwrap();
+        let has_mods = mod_count > 0;
         let resp_json = format!(
-            "{{\"status\":\"ok\",\"exam_mode\":{},\"has_jobsheet\":{},\"jobsheet_name\":\"{}\"}}",
+            "{{\"status\":\"ok\",\"exam_mode\":{},\"has_jobsheet\":{},\"jobsheet_name\":\"{}\",\"has_modules\":{},\"modules_count\":{}}}",
             is_exam,
             has_js,
-            js_name_val.replace('"', "\\\"")
+            js_name_val.replace('"', "\\\""),
+            has_mods,
+            mod_count
         );
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name\r\nX-Exam-Mode: {}\r\nX-Has-Jobsheet: {}\r\nX-Jobsheet-Name: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Exam-Mode, X-Has-Jobsheet, X-Jobsheet-Name, X-Has-Modules, X-Modules-Count\r\nX-Exam-Mode: {}\r\nX-Has-Jobsheet: {}\r\nX-Jobsheet-Name: {}\r\nX-Has-Modules: {}\r\nX-Modules-Count: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             is_exam,
             if has_js { "true" } else { "false" },
             js_name_val,
+            if has_mods { "true" } else { "false" },
+            mod_count,
             resp_json.len(),
             resp_json
         );
         stream.write_all(resp.as_bytes())?;
+        return Ok(());
+    }
+
+    if method == "GET" && (path == "/modules.json" || path == "/modules") {
+        let mods_opt = modules_json_ref.lock().unwrap().clone();
+        let mod_count = *modules_count_ref.lock().unwrap();
+        let body = mods_opt.unwrap_or_else(|| "[]".to_string());
+        let body_bytes = body.as_bytes();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Expose-Headers: X-Has-Modules, X-Modules-Count\r\nX-Has-Modules: {}\r\nX-Modules-Count: {}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            if mod_count > 0 { "true" } else { "false" },
+            mod_count,
+            body_bytes.len()
+        );
+        stream.write_all(resp.as_bytes())?;
+        stream.write_all(body_bytes)?;
         return Ok(());
     }
 
@@ -364,6 +398,7 @@ fn start_classroom_server(
     circuit_content: String,
     jobsheet_base64: Option<String>,
     jobsheet_filename: Option<String>,
+    modules_json: Option<String>,
     state: tauri::State<AppClassroomState>,
 ) -> Result<ClassroomServerInfo, String> {
     let mut js_bytes: Option<Vec<u8>> = None;
@@ -391,15 +426,34 @@ fn start_classroom_server(
         }
     }
 
+    let mut clean_mods_json: Option<String> = None;
+    let mut mod_count: usize = 0;
+    if let Some(ref mj) = modules_json {
+        let trimmed = mj.trim();
+        if !trimmed.is_empty() {
+            if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if !arr.is_empty() {
+                    mod_count = arr.len();
+                    clean_mods_json = Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    let has_mods = mod_count > 0;
+
     let has_js = js_bytes.is_some();
     *state.jobsheet_bytes.lock().unwrap() = js_bytes;
     *state.jobsheet_filename.lock().unwrap() = js_name.clone();
+    *state.modules_json.lock().unwrap() = clean_mods_json;
+    *state.modules_count.lock().unwrap() = mod_count;
 
     if state.running.load(Ordering::SeqCst) {
         *state.task_json.lock().unwrap() = circuit_content.clone();
         if let Some(mut info) = state.server_info.lock().unwrap().clone() {
             info.has_jobsheet = has_js;
             info.jobsheet_name = js_name;
+            info.has_modules = has_mods;
+            info.modules_count = mod_count;
             *state.server_info.lock().unwrap() = Some(info.clone());
             return Ok(info);
         }
@@ -438,6 +492,8 @@ fn start_classroom_server(
         exam_mode: is_exam,
         has_jobsheet: has_js,
         jobsheet_name: js_name,
+        has_modules: has_mods,
+        modules_count: mod_count,
     };
 
     *state.task_json.lock().unwrap() = circuit_content;
@@ -454,6 +510,8 @@ fn start_classroom_server(
     let exam_mode_ref = state.exam_mode.clone();
     let jobsheet_bytes_ref = state.jobsheet_bytes.clone();
     let jobsheet_filename_ref = state.jobsheet_filename.clone();
+    let modules_json_ref = state.modules_json.clone();
+    let modules_count_ref = state.modules_count.clone();
 
     thread::spawn(move || {
         let _ = listener.set_nonblocking(false);
@@ -468,9 +526,11 @@ fn start_classroom_server(
                 let e_mode = exam_mode_ref.clone();
                 let js_b = jobsheet_bytes_ref.clone();
                 let js_f = jobsheet_filename_ref.clone();
+                let m_json = modules_json_ref.clone();
+                let m_cnt = modules_count_ref.clone();
 
                 thread::spawn(move || {
-                    let _ = handle_http_client(&mut stream, t_json, subs, s_dir, e_mode, js_b, js_f);
+                    let _ = handle_http_client(&mut stream, t_json, subs, s_dir, e_mode, js_b, js_f, m_json, m_cnt);
                 });
             }
         }
@@ -489,6 +549,8 @@ fn stop_classroom_server(state: tauri::State<AppClassroomState>) -> Result<(), S
     }
     *state.jobsheet_bytes.lock().unwrap() = None;
     *state.jobsheet_filename.lock().unwrap() = None;
+    *state.modules_json.lock().unwrap() = None;
+    *state.modules_count.lock().unwrap() = 0;
     state.submissions.lock().unwrap().clear();
     Ok(())
 }
@@ -834,6 +896,8 @@ pub fn run() {
         exam_mode: Arc::new(AtomicBool::new(false)),
         jobsheet_bytes: Arc::new(Mutex::new(None)),
         jobsheet_filename: Arc::new(Mutex::new(None)),
+        modules_json: Arc::new(Mutex::new(None)),
+        modules_count: Arc::new(Mutex::new(0)),
     };
 
     tauri::Builder::default()
